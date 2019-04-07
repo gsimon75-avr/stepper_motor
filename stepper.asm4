@@ -175,25 +175,38 @@ ENDFUNC ; USART_UDRE_vect
 
 
 FUNCTION(TIMER1_COMPA_vect)
-    push(r16)
+    push(ZH)
+    push(ZL)
     
-    ldi(r16, 'T')
-    sts(UDR0, r16)
+    ldi(ZL, 'T')
+    sts(UDR0, ZL)
 
-    lpm(r16, Z+)
-    out(PORTC, r16)
+    lds(ZL, phase)
+    and(ZL, ZL)
+    brmi(LOC(PHASE_UP))
 
-    ; handle phase turnaround
-    cpi(ZH, high(control_states_end << 1))
-    brlo(LOC(PHASE_OK))
-    cpi(ZL, low(control_states_end << 1))
-    brlo(LOC(PHASE_OK))
-    ; reset to phase 0
-    ldi(ZH, high(control_states << 1))
-    ldi(ZL, low(control_states << 1))
-  LOC(PHASE_OK):
+  LOC(PHASE_DOWN):
+    dec(ZL)
+    andi(ZL, 0x07)
+    sts(phase, ZL)
+    rjmp(LOC(PHASE_UPDATED))
 
-    pop(r16)
+  LOC(PHASE_UP):
+    inc(ZL)
+    andi(ZL, 0x87)
+    sts(phase, ZL)
+    andi(ZL, 0x07)
+
+  LOC(PHASE_UPDATED):
+    clr(ZH)
+    subi(ZL, low(-(control_states << 1)))
+    sbci(ZH, high(-(control_states << 1)))
+
+    lpm(ZL, Z)
+    out(PORTC, ZL)
+
+    pop(ZL)
+    pop(ZH)
     reti()
 ENDFUNC ; TIMER1_OVF_vect 
 
@@ -205,13 +218,11 @@ FUNCTION(main)
     ldi(r16, _BV(PRTWI0, PRTIM2, PRTIM0, PRSPI0, PRADC))
     sts(PRR, r16)
 
-    ; set the control phase pointer to the 0th state
-    ldi(ZH, high(control_states << 1))
-    ldi(ZL, low(control_states << 1))
-
-    ; initial settings: EnA=EnB=1, In1:4=0
-    ldi(r16, 0x24)
+    ; initial settings: EnA=EnB=0, In1:4=0, phase=0x80
+    clr(r16)
     out(PORTC, r16)
+    ldi(r16, 0x80)
+    sts(phase, r16)
     ; C5:0 are outputs
     in(r16, DDRC)
     ori(r16, 0x3f)
@@ -277,9 +288,8 @@ control_states:
     ;.DB 0x35, 0x25, 0x2d, 0x2c, 0x2e, 0x26, 0x36, 0x34  ; half-step without inhibition
     .DB 0x35, 0x15, 0x2d, 0x29, 0x2e, 0x0e, 0x36, 0x32  ; half-step with inhibition at zero crossing
 
-control_states_end:
-
 ; ------------------------------------------------------------------------------ 
 .DSEG
+phase:      .byte 1     ; bit7 = dir = {1:up, 0:down}
 
 ; vim: set sw=4 ts=4 ft=asm et: 
