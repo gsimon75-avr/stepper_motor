@@ -1,0 +1,285 @@
+; Expected symbols (via -Dname=value in commandline) 
+; F_CPU cpu freq in Hz 
+
+include(boilerplate.m4)
+include(iosyms.m4)
+
+define({BAUDVALUE}, {eval((F_CPU / (8*($1))) - 1)})
+define({USE_BAUD}, BAUDVALUE(250000))
+
+; Wiring
+; PC0 = A
+; PC1 = #A
+; PC2 = EnA
+; PC3 = B
+; PC4 = #B
+; PC5 = EnB
+
+; Step angle = 1.8 deg -> N = 360 / 1.8 = 200 steps / turn
+
+; Steps per second
+define({TIM1_SPS}, 400)
+
+define({TIM1_PRESCALER}, 64)
+; half-step: 2 updates per step, that's why the '2' below
+define({TIM1_LIMIT}, (F_CPU / TIM1_PRESCALER / TIM1_SPS / 2) - 1)
+
+; port/pin assignment in PORTD 
+define({D_LED}, 2)
+define({D_TXD}, 1)
+
+; ------------------------------------------------------------------------------ 
+.CSEG
+.org 0
+rjmp(main)              ; RESET_vect_num
+nop()
+
+rcall(trap)             ; INT0_vect_num 
+nop()
+
+rcall(trap)             ; INT1_vect_num
+nop()
+
+rcall(trap)             ; PCINT0_vect_num
+nop()
+
+rcall(trap)             ; PCINT1_vect_num
+nop()
+
+rcall(trap)             ; PCINT2_vect_num
+nop()
+
+rcall(trap)             ; WDT_vect_num
+nop()
+
+rcall(trap)             ; TIMER2_COMPA_vect_num
+nop()
+
+rcall(trap)             ; TIMER2_COMPB_vect_num
+nop()
+
+rcall(trap)             ; TIMER2_OVF_vect_num
+nop()
+
+rcall(trap)             ; TIMER1_CAPT_vect_num
+nop()
+
+rjmp(TIMER1_COMPA_vect) ; TIMER1_COMPA_vect_num
+nop()
+
+rcall(trap)             ; TIMER1_COMPB_vect_num
+nop
+
+rcall(trap)             ; TIMER1_OVF_vect_num
+nop()
+
+rcall(trap)             ; TIMER0_COMPA_vect_num
+nop()
+
+rcall(trap)             ; TIMER0_COMPB_vect_num
+nop()
+
+rcall(trap)             ; TIMER0_OVF_vect_num
+nop()
+
+rcall(trap)             ; SPI_STC_vect_num
+nop()
+
+rjmp(USART_RX_vect)     ; USART_RX_vect_num
+nop
+
+rjmp(USART_UDRE_vect)   ; USART_UDRE_vect_num
+nop()
+
+rcall(trap)             ; USART_TX_vect_num
+nop()
+
+rcall(trap)             ; ADC_vect_num
+nop
+
+rcall(trap)             ; EE_READY_vect_num
+nop()
+
+rcall(trap)             ; ANALOG_COMP_vect_num
+nop()
+
+rcall(trap)             ; TWI_vect_num
+nop()
+
+rcall(trap)             ; SPM_READY_vect_num
+nop()
+
+
+FUNCTION(wait_some)
+    push(r16)
+    push(r17)
+    push(r18)
+    ldi(r18, 80)
+  LOC(W3):
+    ldi(r17, 0)
+  LOC(W2):
+    ldi(r16, 0)
+  LOC(W1):
+    dec(r16, 1)
+    brne(LOC(W1))
+    dec(r17)
+    brne(LOC(W2))
+    dec(r18)
+    brne(LOC(W3))
+    pop(r18)
+    pop(r17)
+    pop(r16)
+    ret
+ENDFUNC ; wait_some
+
+FUNCTION(trap)
+    cli
+    pop(r16) ; ret addr H
+    pop(r17) ; ret addr L -> {1, 3, 5, ..., 0x33}
+
+    dec(r17) ; -> {0, 2, 4, ..., 0x32}
+    lsr(r17) ; -> {0, 1, 2, ..., 0x19}
+    addi(r17, 0x40) ; -> {0x40, 0x41, ..., 0x59} = {@, A, ..., Y}
+
+    ldi(r16, '-')
+
+  LOC(FOREVER):
+    sbi(PORTD, D_LED)
+    sts(UDR0, r16)
+    rcall(wait_some)
+
+    cbi(PORTD, D_LED)
+    sts(UDR0, r17)
+    rcall(wait_some)
+
+    rjmp(LOC(FOREVER))
+ENDFUNC ; trap
+
+
+FUNCTION(USART_RX_vect)
+    push(r16)
+    push(r17)
+    lds(r16, UDR0)
+    ldi(r17, 0x20)
+    eor(r16, r17)
+    sts(UDR0, r16)
+    pop(r17)
+    pop(r16)
+    reti()
+ENDFUNC ; USART_RX_vect 
+
+
+FUNCTION(USART_UDRE_vect)
+    reti()
+ENDFUNC ; USART_UDRE_vect 
+
+
+FUNCTION(TIMER1_COMPA_vect)
+    push(r16)
+    
+    ldi(r16, 'T')
+    sts(UDR0, r16)
+
+    lpm(r16, Z+)
+    out(PORTC, r16)
+
+    ; handle phase turnaround
+    cpi(ZH, high(control_states_end << 1))
+    brlo(LOC(PHASE_OK))
+    cpi(ZL, low(control_states_end << 1))
+    brlo(LOC(PHASE_OK))
+    ; reset to phase 0
+    ldi(ZH, high(control_states << 1))
+    ldi(ZL, low(control_states << 1))
+  LOC(PHASE_OK):
+
+    pop(r16)
+    reti()
+ENDFUNC ; TIMER1_OVF_vect 
+
+
+; ------------------------------------------------------------------------------ 
+
+FUNCTION(main)
+    ; Switch off unneeded subsystems 
+    ldi(r16, _BV(PRTWI0, PRTIM2, PRTIM0, PRSPI0, PRADC))
+    sts(PRR, r16)
+
+    ; set the control phase pointer to the 0th state
+    ldi(ZH, high(control_states << 1))
+    ldi(ZL, low(control_states << 1))
+
+    ; initial settings: EnA=EnB=1, In1:4=0
+    ldi(r16, 0x24)
+    out(PORTC, r16)
+    ; C5:0 are outputs
+    in(r16, DDRC)
+    ori(r16, 0x3f)
+    out(DDRC, r16)
+    
+    ; D2 is output (led), D1 is output (txd)
+    in(r16, DDRD)
+    ori(r16, _BV(D_LED, D_TXD))
+    out(DDRD, r16)
+    
+    ; Set up Timer1 for CTC/4 mode 
+    clr(r16)
+    sts(TCCR1B, r16)    ; timer 1 disabled 
+    sts(TCCR1A, r16)    ; no output compare, ctc/4 mode: clear on ocr1a match
+    clr(r16)
+    sts(TCNT1H, r16)
+    sts(TCNT1L, r16)
+    ldi(r16, HI8(TIM1_LIMIT)) 
+    sts(OCR1AH, r16)
+    ldi(r16, LO8(TIM1_LIMIT)) 
+    sts(OCR1AL, r16)
+    ldi(r16, _BV(OCIEA)) ; interrupt on oc1a match 
+    sts(TIMSK1, r16)
+    ldi(r16, _BV(WGM2) | 3) ; timer 1 enable, source = prescaler 1:64 -> 250 kHz
+    sts(TCCR1B, r16)
+
+    ; Usart to USE_BAUD, 8 data, even pty, 1 stop, rx data irq 
+    ldi(r16, HI8(USE_BAUD))
+    sts(UBRR0H, r16)
+    ldi(r16, LO8(USE_BAUD))
+    sts(UBRR0L, r16)
+    ldi(r16, _BV(U2X))
+    sts(UCSR0A, r16)
+    ldi(r16, _BV(UCSZ1, UCSZ0, UPM1)) ; 8bits, even pty, 1 stop 
+    sts(UCSR0C, r16)
+    ldi(r16, _BV(RXEN, TXEN, RXCIE, UDRIE))
+    sts(UCSR0B, r16) ; Enable USART 
+
+    ; sbi(GPIOR0, SEND_COMPLETE) 
+    sei()
+
+    ; ------------------------------------------------------------------------------ 
+    ldi(r17, 'S')
+    sts(UDR0, r17)
+  LOC(MAIN_LOOP):
+    ; cbi(GPIOR0, SEND_COMPLETE) 
+    ; rcall(USART_UDRE_vect) ; will enable interrupts on return 
+
+    ; LOC(WAIT_SEND_COMPLETE): 
+    ;; USART_UDRE_vect will set SEND_COMPLETE flag in GPIOR0 when finished 
+    ; sbis(GPIOR0, SEND_COMPLETE) 
+    ; rjmp(LOC(WAIT_SEND_COMPLETE)) 
+    rjmp(LOC(MAIN_LOOP))
+
+ENDFUNC ; main 
+
+
+
+; Motor control states: value sequence for PORTC
+control_states:
+    ;.DB 0x25, 0x25, 0x2c, 0x2c, 0x26, 0x26, 0x34, 0x34  ; wave-drive
+    ;.DB 0x35, 0x35, 0x2d, 0x2d, 0x2e, 0x2e, 0x36, 0x36  ; full-step with always on
+    ;.DB 0x35, 0x25, 0x2d, 0x2c, 0x2e, 0x26, 0x36, 0x34  ; half-step without inhibition
+    .DB 0x35, 0x15, 0x2d, 0x29, 0x2e, 0x0e, 0x36, 0x32  ; half-step with inhibition at zero crossing
+
+control_states_end:
+
+; ------------------------------------------------------------------------------ 
+.DSEG
+
+; vim: set sw=4 ts=4 ft=asm et: 
