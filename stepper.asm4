@@ -159,10 +159,16 @@ ENDFUNC ; trap
 FUNCTION(USART_RX_vect)
     push(r16)
     push(r17)
+    in(r16, SREG)
+    push(r16)
+
     lds(r16, UDR0)
     ldi(r17, 0x20)
     eor(r16, r17)
     sts(UDR0, r16)
+
+    pop(r16)
+    out(SREG, r16)
     pop(r17)
     pop(r16)
     reti()
@@ -175,43 +181,137 @@ ENDFUNC ; USART_UDRE_vect
 
 
 FUNCTION(TIMER1_COMPA_vect)
-    push(ZH)
-    push(ZL)
+    pusha()
+    in(r16, SREG)
+    push(r16)
     
-    ldi(ZL, 'T')
-    sts(UDR0, ZL)
+    in(r16, SPL)
+    sts(spl_idle, r16)
+    in(r16, SPH)
+    sts(sph_idle, r16)
 
-    lds(ZL, phase)
-    and(ZL, ZL)
+    lds(r16, spl_tim1)
+    out(SPL, r16)
+    lds(r16, sph_tim1)
+    out(SPH, r16)
+
+    pop(r16)
+    out(SREG, r16)
+    popa()
+    ret()   ; NOTE: intentionally 'ret', as it jumps to thread_tim1
+ENDFUNC ; TIMER1_OVF_vect 
+
+
+FUNCTION(tim1_yield)
+    pusha()
+    in(r16, SREG)
+    push(r16)
+
+    in(r16, SPL)
+    sts(spl_tim1, r16)
+    in(r16, SPH)
+    sts(sph_tim1, r16)
+
+    lds(r16, spl_idle)
+    out(SPL, r16)
+    lds(r16, sph_idle)
+    out(SPH, r16)
+
+    pop(r16)
+    out(SREG, r16)
+    popa()
+    reti()  ; NOTE: intentionally 'reti', as here is where we leave the actual IRQ processing
+ENDFUNC ; tim1_yield
+
+
+; control phase: bit7 = dir = {1:up, 0:down}, bit2:0 = index into @control_states[]
+define({rPHASE}, {r25}) ; only on tim1 thread
+
+FUNCTION(do_step)
+    and(rPHASE, rPHASE)
     brmi(LOC(PHASE_UP))
 
   LOC(PHASE_DOWN):
-    dec(ZL)
-    andi(ZL, 0x07)
-    sts(phase, ZL)
+    dec(rPHASE)
+    andi(rPHASE, 0x07)
+    mov(ZL, rPHASE)
     rjmp(LOC(PHASE_UPDATED))
 
   LOC(PHASE_UP):
-    inc(ZL)
-    andi(ZL, 0x87)
-    sts(phase, ZL)
+    inc(rPHASE)
+    andi(rPHASE, 0x87)
+    mov(ZL, rPHASE)
     andi(ZL, 0x07)
 
   LOC(PHASE_UPDATED):
     clr(ZH)
     subi(ZL, low(-(control_states << 1)))
     sbci(ZH, high(-(control_states << 1)))
-
     lpm(ZL, Z)
     out(PORTC, ZL)
+    rjmp(tim1_yield) ; tail call
+ENDFUNC ; do_step
 
-    pop(ZL)
-    pop(ZH)
-    reti()
-ENDFUNC ; TIMER1_OVF_vect 
+
+FUNCTION(do_release)
+    in(ZL, PORTC)
+    cbr(ZL, 0x24)
+    out(PORTC, ZL)
+    rjmp(tim1_yield) ; tail call
+ENDFUNC ; do_release
+
+
+FUNCTION(motor_thread)
+    ldi(rPHASE, 0x80) ; up
+
+  LOC(FOREVER):
+    sbr(rPHASE, 0x80) ; up
+    ldi(r16, 200)
+  LOC(CCW):
+    rcall(do_step)
+    rcall(do_step)
+    dec(r16)
+    brne(LOC(CCW))
+
+    rcall(do_release)
+    ldi(r16, 200)
+  LOC(WAIT1):
+    rcall(tim1_yield)
+    rcall(tim1_yield)
+    dec(r16)
+    brne(LOC(WAIT1))
+
+    cbr(rPHASE, 0x80) ; down
+    ldi(r16, 200)
+  LOC(CW):
+    rcall(do_step)
+    rcall(do_step)
+    dec(r16)
+    brne(LOC(CW))
+
+    rcall(do_release)
+    ldi(r16, 200)
+  LOC(WAIT2):
+    rcall(tim1_yield)
+    rcall(tim1_yield)
+    dec(r16)
+    brne(LOC(WAIT2))
+
+    rjmp(LOC(FOREVER))
+ENDFUNC ; motor_thread
 
 
 ; ------------------------------------------------------------------------------ 
+
+FUNCTION(wait_tx_complete)
+    push(r16)
+  LOC(WAIT):
+    lds(r16, UCSR0A)
+    andi(r16, _BV(UDRE))
+    breq(LOC(WAIT))
+    pop(r16)
+    ret()
+ENDFUNC ; wait_tx_complete
 
 FUNCTION(main)
     ; Switch off unneeded subsystems 
@@ -221,8 +321,6 @@ FUNCTION(main)
     ; initial settings: EnA=EnB=0, In1:4=0, phase=0x80
     clr(r16)
     out(PORTC, r16)
-    ldi(r16, 0x80)
-    sts(phase, r16)
     ; C5:0 are outputs
     in(r16, DDRC)
     ori(r16, 0x3f)
@@ -258,15 +356,31 @@ FUNCTION(main)
     sts(UCSR0A, r16)
     ldi(r16, _BV(UCSZ1, UCSZ0, UPM1)) ; 8bits, even pty, 1 stop 
     sts(UCSR0C, r16)
-    ldi(r16, _BV(RXEN, TXEN, RXCIE, UDRIE))
-    sts(UCSR0B, r16) ; Enable USART 
+    ldi(r16, _BV(RXEN, TXEN, RXCIE)) ;, UDRIE))
+    sts(UCSR0B, r16) ; Enable IRQs 
+
+    ldi(r17, 'S')
+    sts(UDR0, r17)
+    rcall(wait_tx_complete)
+
+    ; setup thread stack: push retaddr, skip registers' size
+    ldi(r16, low(motor_thread))
+    sts(stack_tim1_top - 1, r16)
+    ldi(r16, high(motor_thread))
+    sts(stack_tim1_top - 2, r16)
+    ; set pushed SREG to 0
+    clr(r16)
+    sts(stack_tim1_top - 0x23, r16)
+    ; store threak stackptr
+    ldi(r16, low(stack_tim1_top - 0x23))
+    sts(spl_tim1, r16)
+    ldi(r16, high(stack_tim1_top - 0x23))
+    sts(sph_tim1, r16)
 
     ; sbi(GPIOR0, SEND_COMPLETE) 
     sei()
 
     ; ------------------------------------------------------------------------------ 
-    ldi(r17, 'S')
-    sts(UDR0, r17)
   LOC(MAIN_LOOP):
     ; cbi(GPIOR0, SEND_COMPLETE) 
     ; rcall(USART_UDRE_vect) ; will enable interrupts on return 
@@ -275,6 +389,13 @@ FUNCTION(main)
     ;; USART_UDRE_vect will set SEND_COMPLETE flag in GPIOR0 when finished 
     ; sbis(GPIOR0, SEND_COMPLETE) 
     ; rjmp(LOC(WAIT_SEND_COMPLETE)) 
+
+    cli()
+    ldi(ZL, '.')
+    sts(UDR0, ZL)
+    rcall(wait_tx_complete)
+    sei()
+
     rjmp(LOC(MAIN_LOOP))
 
 ENDFUNC ; main 
@@ -290,6 +411,13 @@ control_states:
 
 ; ------------------------------------------------------------------------------ 
 .DSEG
-phase:      .byte 1     ; bit7 = dir = {1:up, 0:down}
+
+stack_tim1: .byte 128
+stack_tim1_top:
+
+spl_idle:   .byte 1     ; sp for idle thread (== main)
+sph_idle:   .byte 1
+spl_tim1:   .byte 1     ; sp for tim1 thread
+sph_tim1:   .byte 1
 
 ; vim: set sw=4 ts=4 ft=asm et: 
