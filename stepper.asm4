@@ -377,24 +377,15 @@ FUNCTION(main)
     ldi(r16, high(stack_tim1_top - 0x23))
     sts(sph_tim1, r16)
 
-    ; sbi(GPIOR0, SEND_COMPLETE) 
     sei()
 
     ; ------------------------------------------------------------------------------ 
   LOC(MAIN_LOOP):
-    ; cbi(GPIOR0, SEND_COMPLETE) 
-    ; rcall(USART_UDRE_vect) ; will enable interrupts on return 
-
-    ; LOC(WAIT_SEND_COMPLETE): 
-    ;; USART_UDRE_vect will set SEND_COMPLETE flag in GPIOR0 when finished 
-    ; sbis(GPIOR0, SEND_COMPLETE) 
-    ; rjmp(LOC(WAIT_SEND_COMPLETE)) 
-
-    cli()
-    ldi(ZL, '.')
-    sts(UDR0, ZL)
-    rcall(wait_tx_complete)
-    sei()
+    ;cli()
+    ;ldi(ZL, '.')
+    ;sts(UDR0, ZL)
+    ;rcall(wait_tx_complete)
+    ;sei()
 
     rjmp(LOC(MAIN_LOOP))
 
